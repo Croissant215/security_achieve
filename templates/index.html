@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="lab-token" content="{{ token }}">
+  <title>Security Lab · 웹 보안 실습 노트</title>
+  <link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#workspace">실습 본문으로 이동</a>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Security Lab 처음으로"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 3 4 6v6c0 4 8 9 8 9s8-5 8-9V6l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg><span>Security<span class="brand-light">Lab</span></span></a>
+      <div class="sidebar-heading">실습 노트 <span>01—02</span></div>
+      <nav aria-label="실습 선택">
+        <button class="lesson-nav active" data-lesson="sql" aria-pressed="true"><span class="nav-number">01</span><span>SQL 인젝션<small>로그인과 데이터베이스</small></span><span class="nav-arrow">↗</span></button>
+        <button class="lesson-nav" data-lesson="xss" aria-pressed="false"><span class="nav-number">02</span><span>저장형 XSS<small>게시판과 브라우저</small></span><span class="nav-arrow">↗</span></button>
+      </nav>
+      <div class="side-guide"><p class="eyebrow">HOW TO LEARN</p><ol><li>정상 동작을 확인하세요.</li><li>같은 입력에 방어를 적용하세요.</li><li>결과가 달라지는 이유를 찾아보세요.</li></ol></div>
+      <div class="local-status"><span class="status-dot"></span>로컬 실습 환경<small>가상 계정 · 격리된 게시판</small></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar"><span>웹 보안 실습 노트 <span class="divider">/</span> <strong id="breadcrumb">01. SQL 인젝션</strong></span><button id="reset" class="button subtle" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6"/></svg>실습 초기화</button></header>
+      <main id="workspace">
+        <section class="intro"><p class="eyebrow" id="lesson-number">LAB 01 / SQL INJECTION</p><h1 id="lesson-title">로그인은 어떻게 우회될까요?</h1><p id="lesson-description">입력이 SQL 명령의 일부가 될 때 생기는 문제를 살펴보고,<br class="desktop-break">매개변수 바인딩으로 달라지는 실제 로그인 결과를 비교합니다.</p><div class="lesson-meta"><span>실제 SQLite 쿼리</span><span>취약 · 방어 코드 비교</span><span>기본 검증 3개</span></div></section>
+        <ol class="steps" aria-label="실습 순서"><li><span>1</span>입력 준비</li><li><span>2</span>취약 코드 실행</li><li><span>3</span>방어 적용 · 비교</li></ol>
+        <div id="notice" class="notice" role="status" aria-live="polite">실습 자료를 불러오는 중입니다.</div>
+        <section class="panel input-panel" aria-labelledby="input-heading">
+          <div class="section-heading"><div><span class="section-number">01</span><h2 id="input-heading">실험할 입력</h2></div><span id="mode-badge" class="badge warning">현재: 취약 모드</span></div>
+          <div class="example-row"><span>예제 불러오기</span><div id="examples" class="example-buttons"></div></div>
+          <form id="lab-form">
+            <div id="sql-inputs" class="field-grid"><label for="username">아이디<input id="username" name="username" maxlength="200" value="student" autocomplete="off" spellcheck="false" required></label><label for="password">실습 비밀번호<input id="password" name="password" maxlength="200" value="study1234" autocomplete="off" spellcheck="false" required></label></div>
+            <div id="xss-inputs" hidden><label for="body">게시글 본문<textarea id="body" name="body" rows="4" maxlength="4000" spellcheck="false">안녕하세요</textarea></label><p class="field-note">저장한 원문을 다시 열어 확인합니다. 실습용 스크립트: <code>&lt;script&gt;labSignal()&lt;/script&gt;</code></p></div>
+            <p id="account-hint" class="field-note">가상 계정 <code>student / study1234</code> · 실제 비밀번호를 입력하지 마세요.</p>
+            <div class="action-row"><button id="run" class="button primary" type="submit" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span id="run-label">취약 코드 실행</span></button><button id="defend" class="button" type="button" disabled>방어 적용</button><span id="input-state" class="action-hint">먼저 정상 로그인을 실행해 보세요.</span></div>
+          </form>
+        </section>
+        <section class="results-section" aria-labelledby="results-heading"><div class="section-heading"><div><span class="section-number">02</span><h2 id="results-heading">실행 결과 비교</h2></div><span class="small muted">같은 입력, 다른 처리 방식</span></div><p id="comparison-note" class="comparison-note" aria-live="polite">두 모드를 실행하면 결과를 비교할 수 있습니다.</p><div class="compare-grid">
+          <article class="result-panel" id="result-vulnerable"><header><span class="mode-dot vulnerable"></span><h3>취약 코드</h3><span class="result-tag" id="tag-vulnerable">실행 전</span></header><div id="output-vulnerable" class="result-output"><div class="empty-result"><span>01 / BEFORE</span><p>입력은 준비됐나요?</p><small>취약 코드를 실행하면 여기에 결과가 나타납니다.</small></div></div></article>
+          <article class="result-panel" id="result-secure"><header><span class="mode-dot secure"></span><h3>방어 코드</h3><span class="result-tag" id="tag-secure">실행 전</span></header><div id="output-secure" class="result-output"><div class="empty-result"><span>02 / AFTER</span><p>방어를 적용해 보세요.</p><small>같은 입력을 다시 실행해 차이를 확인합니다.</small></div></div></article>
+        </div></section>
+        <section class="panel code-panel"><div class="section-heading"><div><span class="section-number">03</span><h2>무엇이 달라졌을까요?</h2></div><span class="small muted">실행 함수의 실제 소스</span></div><div class="compare-grid code-grid"><div id="code-vulnerable-wrap"><h3>취약 구현 <span>입력을 코드로 해석</span></h3><pre><code id="code-vulnerable"></code></pre></div><div id="code-secure-wrap"><h3>방어 구현 <span>입력을 데이터로 처리</span></h3><pre><code id="code-secure"></code></pre></div></div><details class="explanation"><summary>해설 보기 <span>원인 → 방어 → 재검증</span></summary><div id="explanation-content"></div></details></section>
+        <section class="panel verification"><div class="section-heading"><div><span class="section-number">04</span><h2>전체 검증표</h2></div><button id="verify" class="button" disabled>전체 검증 실행</button></div><p class="muted small">정상 입력과 공격 예제를 두 모드에서 독립적으로 실행합니다. ‘통과’는 기대한 실험 결과와 일치한다는 뜻이며, 취약 코드가 안전하다는 의미가 아닙니다.</p><p id="verify-status" role="status">아직 검증을 실행하지 않았습니다.</p><div class="table-scroll"><table><caption class="sr-only">사례별 기대 결과와 실제 관찰 결과</caption><thead><tr><th scope="col">사례</th><th scope="col">모드</th><th scope="col">기대 결과</th><th scope="col">관찰 결과</th><th scope="col">검증</th></tr></thead><tbody id="verification-body"><tr><td colspan="5" class="table-empty">전체 검증을 실행하면 6개 결과가 표시됩니다.</td></tr></tbody></table></div><div id="verification-frames" class="verification-frames" aria-label="검증용 게시글 실습 영역"></div></section>
+        <details class="panel logs"><summary>요청·처리 로그 <span id="log-count">0건</span></summary><p class="small muted">애플리케이션이 기록한 실제 요청과 처리 결과입니다. 네트워크 패킷 캡처가 아닙니다.</p><ol id="log-list"><li class="muted">아직 실행한 요청이 없습니다.</li></ol></details>
+        <footer class="footer"><span>Security Lab <span class="divider">/</span> 이해하고, 실험하고, 검증하기</span><span>초기 버전 0.1 · 로컬 전용</span></footer>
+      </main>
+    </div>
+  </div>
+  <dialog id="reset-dialog"><h2>실습을 처음부터 시작할까요?</h2><p>이 브라우저의 게시글, 로그인 상태, 결과와 로그를 지웁니다.<br>프로그램 소스는 그대로 유지됩니다.</p><div class="action-row"><button id="cancel-reset" class="button">취소</button><button id="confirm-reset" class="button primary">초기화</button></div></dialog>
+</body></html>

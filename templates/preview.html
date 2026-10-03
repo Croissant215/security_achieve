@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>격리된 게시글 실습</title>
+  <style>body{font:16px/1.7 system-ui,"Malgun Gothic",sans-serif;margin:20px;color:#18332f;overflow-wrap:anywhere}article{white-space:pre-wrap}#signal{color:#9a3412;font-weight:700;margin-bottom:12px}script{display:none}</style>
+  <script>
+  (() => {
+    const id = {{ post_id|tojson }};
+    let signaled = false;
+    const errors = [];
+    const notify = parent.postMessage.bind(parent);
+    window.labSignal = () => {
+      signaled = true;
+      document.getElementById('signal').textContent = '[스크립트 실행됨]';
+    };
+    // alert is observed in the sandbox, never a blocking dialog in the main UI.
+    window.alert = window.labSignal;
+    window.addEventListener('error', () => errors.push('실습 코드 실행 오류'));
+    window.addEventListener('securitypolicyviolation', () => errors.push('격리 정책이 외부 자원 또는 작업을 제한했습니다.'));
+    window.addEventListener('load', () => setTimeout(() => {
+      const body = document.getElementById('post-body');
+      notify({type: 'lab-observation', id, signaled, errors,
+        text: body ? body.innerText : null,
+        bold: !!body?.querySelector('b, strong')}, '*');
+    }, 150), {once: true});
+  })();
+  </script>
+</head>
+<body><div id="signal" role="status"></div><article id="post-body">{{ rendered|safe }}</article></body>
+</html>
