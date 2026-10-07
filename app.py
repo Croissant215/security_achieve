@@ -3,13 +3,15 @@ from contextlib import closing
 from datetime import datetime
 import html
 import inspect
+import json
 from pathlib import Path
 import secrets
 import sqlite3
 
-from flask import Flask, abort, jsonify, render_template, request, session
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 MODES = ('vulnerable', 'secure')
 XSS_SAMPLE = '<script>labSignal()</script>'
@@ -44,6 +46,17 @@ def secure_render(body):
     return html.escape(body)  # Encode for an HTML text context on output.
 
 
+def save_board_post(db, post_id, owner, mode, title, body, author, created_at):
+    db.execute('INSERT INTO posts (id, owner, mode, title, body, author, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+               (post_id, owner, mode, title, body, author, created_at))
+    db.commit()
+
+
+def load_board_post(db, post_id, owner):
+    return db.execute("SELECT * FROM posts WHERE id = ? AND owner = ? AND title != ''",
+                      (post_id, owner)).fetchone()
+
+
 def create_app(database=None):
     app = Flask(__name__)
     app.config.update(
@@ -55,7 +68,13 @@ def create_app(database=None):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(db_path)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, owner TEXT NOT NULL, mode TEXT NOT NULL, body TEXT NOT NULL)')
+        columns = {row[1] for row in db.execute('PRAGMA table_info(posts)')}
+        for column in ('title', 'author', 'created_at'):
+            if column not in columns:
+                db.execute(f"ALTER TABLE posts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        db.execute('CREATE TABLE IF NOT EXISTS board_trace (owner TEXT PRIMARY KEY, event TEXT NOT NULL)')
         db.commit()
+    preview_signer = URLSafeTimedSerializer(app.secret_key, salt='board-preview')
     accounts = [(1, 'admin', generate_password_hash('admin1234')), (2, 'student', generate_password_hash('study1234'))]
 
     def authenticate(mode, username, password):
@@ -102,9 +121,15 @@ def create_app(database=None):
 
     @app.before_request
     def protect_lab():
+        if request.endpoint in ('index', 'board', 'board_new', 'board_detail', 'board_login', 'board_logout'):
+            session.setdefault('owner', secrets.token_hex(16))
+            session.setdefault('lab_token', secrets.token_hex(24))
+        if request.path.startswith('/board') and request.method == 'POST':
+            if not session.get('lab_token') or not secrets.compare_digest(request.form.get('token', '').encode(), session['lab_token'].encode()):
+                abort(403, '글쓰기 페이지를 다시 열어 작성하세요.')
         if request.path.startswith('/api/') and request.method == 'POST':
             token = session.get('lab_token', '')
-            if not token or not secrets.compare_digest(request.headers.get('X-Lab-Token', ''), token):
+            if not token or not secrets.compare_digest(request.headers.get('X-Lab-Token', '').encode(), token.encode()):
                 abort(403, '실습 페이지를 새로고침한 후 다시 실행하세요.')
             if not request.is_json:
                 abort(415, 'JSON 형식의 요청이 필요합니다.')
@@ -151,10 +176,133 @@ def create_app(database=None):
         return value
 
     @app.get('/')
+    def home():
+        return redirect(url_for('board'))
+
+    @app.get('/lab')
     def index():
-        session.setdefault('owner', secrets.token_hex(16))
-        session.setdefault('lab_token', secrets.token_hex(24))
         return render_template('index.html', token=session['lab_token'])
+
+    def board_event(operation, inputs, results):
+        event = dict(operation=operation, request=f'{request.method} {request.path}',
+                     time=datetime.now().astimezone().isoformat(timespec='seconds'), inputs=inputs, results=results)
+        with closing(sqlite3.connect(db_path)) as db:
+            db.execute('INSERT INTO board_trace (owner, event) VALUES (?, ?) ON CONFLICT(owner) DO UPDATE SET event = excluded.event',
+                       (session['owner'], json.dumps(event, ensure_ascii=False)))
+            db.commit()
+
+    def board_page(view, **context):
+        with closing(sqlite3.connect(db_path)) as db:
+            row = db.execute('SELECT event FROM board_trace WHERE owner = ?', (session['owner'],)).fetchone()
+        return render_template('board.html', view=view, trace=json.loads(row[0]) if row else None,
+                               user=session.get('board_user'), mode=session.get('board_mode', 'secure'),
+                               **context)
+
+    @app.route('/board/login', methods=['GET', 'POST'])
+    def board_login():
+        username, password, error = '', '', None
+        if request.method == 'POST':
+            selected = request.form.get('mode')
+            if selected not in MODES:
+                abort(400, '로그인 처리 모드를 확인하세요.')
+            session['board_mode'] = selected
+            session.pop('board_user', None)
+            username, password = request.form.get('username', ''), request.form.get('password', '')
+            if not username.strip() or not password.strip() or max(len(username), len(password)) > 200:
+                return board_page('login', username=username, password='', error='아이디와 비밀번호를 각각 1~200자로 입력하세요.'), 400
+            modes = MODES if request.form.get('compare') == 'yes' else (selected,)
+            results = []
+            for execution_mode in modes:
+                result = authenticate(execution_mode, username, password)
+                label = result.get('error') or (f"로그인 성공 · {result['user']['username']}" if result['authenticated'] else '로그인 실패 · 계정 정보를 확인하세요.')
+                results.append(dict(mode=execution_mode, result=label, query=result.get('query', ''),
+                                    code=inspect.getsource(secure_login if execution_mode == 'secure' else vulnerable_login)))
+                if execution_mode == selected:
+                    if result.get('user'):
+                        session['board_user'] = result['user']
+                    else:
+                        error = label
+            board_event('로그인', {'아이디': username, '비밀번호': '가상 실습 입력 · SQL에 표시될 수 있음'}, results)
+            if session.get('board_user'):
+                flash('로그인했습니다. 글을 작성하거나 목록에서 게시글을 열어 보세요.')
+                return redirect(url_for('board'), code=303)
+        return board_page('login', username=username, password=password, error=error)
+
+    @app.post('/board/logout')
+    def board_logout():
+        session.pop('board_user', None)
+        board_event('로그아웃', {}, [dict(result='게시판 로그인 상태를 삭제했습니다.', code="session.pop('board_user', None)")])
+        return redirect(url_for('board'), code=303)
+
+    @app.get('/board')
+    def board():
+        with closing(sqlite3.connect(db_path)) as db:
+            db.row_factory = sqlite3.Row
+            posts = db.execute("SELECT id, title, author, created_at FROM posts WHERE owner = ? AND title != '' ORDER BY created_at DESC, rowid DESC",
+                               (session['owner'],)).fetchall()
+        return board_page('list', posts=posts)
+
+    @app.route('/board/new', methods=['GET', 'POST'])
+    def board_new():
+        if not session.get('board_user'):
+            if request.method == 'POST':
+                abort(403, '글을 저장하려면 게시판에서 먼저 로그인하세요.')
+            return redirect(url_for('board_login'))
+        title, body, error = '', '', None
+        status = 200
+        if request.method == 'POST':
+            title, body = request.form.get('title', ''), request.form.get('body', '')
+            if not title.strip() or len(title) > 100 or not body.strip() or len(body) > 4000:
+                error, status = '제목은 1~100자, 본문은 1~4,000자로 입력하세요. 공백만 입력할 수 없습니다.', 400
+            else:
+                try:
+                    with closing(sqlite3.connect(db_path)) as db:
+                        save_board_post(db, secrets.token_hex(24), session['owner'], session.get('board_mode', 'secure'),
+                                        title.strip(), body, session['board_user']['username'],
+                                        datetime.now().astimezone().isoformat(timespec='seconds'))
+                except sqlite3.Error:
+                    app.logger.exception('Board post could not be saved')
+                    error, status = '글을 저장하지 못했습니다. 입력한 내용을 확인하고 다시 저장하세요.', 503
+                else:
+                    board_event('글 저장', {'제목': title.strip(), '본문': body},
+                                [dict(result='SQLite 저장 완료 · 본문은 아직 브라우저에서 열지 않았습니다.', code=inspect.getsource(save_board_post))])
+                    flash('글을 저장했습니다. 제목을 누르면 본문을 볼 수 있습니다.')
+                    return redirect(url_for('board'), code=303)
+        return board_page('new', title=title, body=body, error=error), status
+
+    @app.get('/board/<post_id>')
+    def board_detail(post_id):
+        with closing(sqlite3.connect(db_path)) as db:
+            db.row_factory = sqlite3.Row
+            post = load_board_post(db, post_id, session['owner'])
+        if post is None:
+            abort(404, '게시글이 없거나 초기화되었습니다. 게시판 목록에서 다시 확인하세요.')
+        output_mode = request.args.get('mode', session.get('board_mode', 'secure'))
+        if output_mode not in MODES:
+            abort(400, '본문 출력 모드를 확인하세요.')
+        board_event('게시글 열람', {'게시글 ID': post_id},
+                    [dict(result='SQLite 원문 조회 완료', code=inspect.getsource(load_board_post))])
+        output_modes = [output_mode]
+        if request.args.get('compare') == 'yes':
+            output_modes += [mode for mode in MODES if mode != output_mode]
+        previews = [dict(mode=mode, url=url_for('board_preview', ticket=preview_signer.dumps(
+            dict(id=post_id, owner=session['owner'], mode=mode))),
+            code=inspect.getsource(secure_render if mode == 'secure' else vulnerable_render)) for mode in output_modes]
+        return board_page('detail', post=post, previews=previews, output_mode=output_mode)
+
+    @app.get('/preview/board/<ticket>')
+    def board_preview(ticket):
+        try:
+            data = preview_signer.loads(ticket, max_age=600)
+        except BadSignature:
+            abort(404, '본문 요청이 만료되었거나 유효하지 않습니다. 게시글을 다시 여세요.')
+        with closing(sqlite3.connect(db_path)) as db:
+            db.row_factory = sqlite3.Row
+            post = load_board_post(db, data['id'], data['owner'])
+        if post is None:
+            abort(404, '초기화된 게시글입니다.')
+        rendered = secure_render(post['body']) if data['mode'] == 'secure' else vulnerable_render(post['body'])
+        return render_template('preview.html', rendered=rendered, post_id=data['id'])
 
     @app.get('/api/lessons')
     def lessons():
@@ -191,7 +339,7 @@ def create_app(database=None):
         body = text_field(data, 'body', 4000)
         post_id = secrets.token_hex(24)
         with closing(sqlite3.connect(db_path)) as db:
-            db.execute('INSERT INTO posts VALUES (?, ?, ?, ?)', (post_id, session['owner'], data['mode'], body))
+            db.execute('INSERT INTO posts (id, owner, mode, body) VALUES (?, ?, ?, ?)', (post_id, session['owner'], data['mode'], body))
             db.commit()
         return jsonify(id=post_id, preview_url=f'/preview/{post_id}', log=record(
             data['mode'], '게시글 저장', {'body': body}, 'SQLite에 바인딩 쿼리로 원문 저장', f'게시글 {post_id[:8]} 저장 완료'))
@@ -232,9 +380,12 @@ def create_app(database=None):
     def reset():
         with closing(sqlite3.connect(db_path)) as db:
             db.execute('DELETE FROM posts WHERE owner = ?', (session.get('owner'),))
+            db.execute('DELETE FROM board_trace WHERE owner = ?', (session.get('owner'),))
             db.commit()
         for mode in MODES:
             session.pop(f'user_{mode}', None)
+        session.pop('board_user', None)
+        session.pop('board_mode', None)
         return jsonify(message='이 브라우저의 게시글과 로그인 상태를 초기화했습니다.')
 
     return app

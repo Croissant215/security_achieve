@@ -27,7 +27,7 @@ def main():
                 errors, external = [], []
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 page.route('**/*', lambda route: route.continue_() if route.request.url.startswith(base + '/') else (external.append(route.request.url), route.abort()))
-                page.goto(base)
+                page.goto(base + '/lab')
                 expect(page.locator('#run')).to_be_enabled()
                 page.screenshot(path=str(artifacts / 'desktop.png'), full_page=True)
                 page.locator('#run').click()
@@ -103,6 +103,40 @@ def main():
                 assert not errors, errors
                 assert not external, external
                 print('375/768/1024/1440px: no page overflow; no external requests or unexpected page errors')
+                page.goto(base + '/board')
+                expect(page.locator('tbody')).to_contain_text('아직 작성한 글이 없습니다')
+                page.get_by_role('link', name='글쓰기', exact=True).click()
+                page.get_by_label('아이디', exact=True).fill('student')
+                page.get_by_label('실습 비밀번호', exact=True).fill('study1234')
+                page.get_by_role('button', name='로그인', exact=True).click()
+                page.get_by_role('link', name='글쓰기', exact=True).click()
+                page.get_by_label('제목', exact=True).fill('첫 게시글 <b>제목</b>')
+                body = '안녕하세요\n<script>document.body.dataset.leaked="yes"</script>'
+                page.get_by_label('본문', exact=True).fill(body)
+                page.get_by_role('button', name='글 저장', exact=True).click()
+                expect(page).to_have_url(base + '/board')
+                page.reload()
+                expect(page.locator('.board-title')).to_have_count(1)
+                page.screenshot(path=str(artifacts / 'board-desktop.png'), full_page=True)
+                page.locator('.board-title').click()
+                expect(page.locator('.board-body')).to_have_text(body)
+                assert page.locator('body').get_attribute('data-leaked') is None
+                page.reload()
+                expect(page.locator('.board-body')).to_have_text(body)
+                for width in (375, 768, 1024, 1440):
+                    page.set_viewport_size({'width': width, 'height': 1000})
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                page.set_viewport_size({'width': 375, 'height': 900})
+                page.get_by_role('link', name='목록으로', exact=True).click()
+                page.wait_for_load_state('networkidle')
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                page.screenshot(path=str(artifacts / 'board-mobile.png'), full_page=True)
+                page.get_by_role('link', name='글쓰기', exact=True).click()
+                page.wait_for_load_state('networkidle')
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                assert not errors, errors
+                assert not external, external
+                print('Board: write/list/detail, refresh, escaped script, mobile layouts OK')
                 browser.close()
         finally:
             server.shutdown()
