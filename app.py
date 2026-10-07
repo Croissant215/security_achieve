@@ -1,6 +1,6 @@
 """Local, fictional-data-only SQL injection and stored XSS classroom lab."""
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 import html
 import inspect
 import json
@@ -60,13 +60,16 @@ def load_board_post(db, post_id, owner):
 def create_app(database=None):
     app = Flask(__name__)
     app.config.update(
-        SECRET_KEY=secrets.token_hex(32), MAX_CONTENT_LENGTH=24_000,
+        MAX_CONTENT_LENGTH=24_000, PERMANENT_SESSION_LIFETIME=timedelta(days=30),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict',
         TRUSTED_HOSTS=['localhost', '127.0.0.1'],
     )
     db_path = Path(database) if database else Path(app.instance_path) / 'lab.sqlite3'
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(db_path)) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        db.execute("INSERT OR IGNORE INTO settings VALUES ('session_secret', ?)", (secrets.token_hex(32),))
+        app.secret_key = db.execute("SELECT value FROM settings WHERE name = 'session_secret'").fetchone()[0]
         db.execute('CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, owner TEXT NOT NULL, mode TEXT NOT NULL, body TEXT NOT NULL)')
         columns = {row[1] for row in db.execute('PRAGMA table_info(posts)')}
         for column in ('title', 'author', 'created_at'):
@@ -122,6 +125,7 @@ def create_app(database=None):
     @app.before_request
     def protect_lab():
         if request.endpoint in ('index', 'board', 'board_new', 'board_detail', 'board_login', 'board_logout'):
+            session.permanent = True
             session.setdefault('owner', secrets.token_hex(16))
             session.setdefault('lab_token', secrets.token_hex(24))
         if request.path.startswith('/board') and request.method == 'POST':

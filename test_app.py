@@ -163,6 +163,29 @@ class LabTests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT body, title FROM posts').fetchone(), ('existing body', ''))
             self.assertEqual(migrated.test_client().get('/board').status_code, 200)
 
+    def test_restart_preserves_browser_posts_and_isolation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'restart.sqlite3'
+            first = create_app(path).test_client()
+            response = first.get('/board')
+            self.assertIn('Expires=', response.headers['Set-Cookie'])
+            with first.session_transaction() as state:
+                token = state['lab_token']
+            first.post('/board/login', data=dict(token=token, username='student', password='study1234', mode='secure'))
+            first.post('/board/new', data=dict(token=token, title='재시작 뒤에도 남는 글', body='저장된 본문'))
+            cookie = first.get_cookie('session').value
+            restarted = create_app(path)
+            returning = restarted.test_client()
+            returning.set_cookie('session', cookie)
+            listing = returning.get('/board').text
+            self.assertIn('재시작 뒤에도 남는 글', listing)
+            self.assertIn('student 로그인 중', listing)
+            detail = re.search(r'class="board-title" href="([^"]+)"', listing)[1]
+            self.assertIn('저장된 본문', returning.get(detail).text)
+            self.assertEqual(restarted.test_client().get(detail).status_code, 404)
+            returning.post('/api/reset', json={}, headers={'X-Lab-Token': token})
+            self.assertEqual(returning.get(detail).status_code, 404)
+
 
 if __name__ == '__main__':
     unittest.main()
